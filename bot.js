@@ -22,18 +22,40 @@ let isStarting = false;
 let reconnectTimer = null;
 
 function getAuthPath() {
-    if (process.env.AUTH_PATH && process.env.AUTH_PATH.length > 0) return process.env.AUTH_PATH;
     const os = require('os');
-    // For Render/production, use persistent disk storage
-    // For local development, use user's home directory to avoid OneDrive symlink issues
-    if (process.env.NODE_ENV === 'production') {
-        return '/home/render/.whatsapp_ai_auth';
+    const fallback = '/tmp/whatsapp_ai_auth';
+    let authPath = process.env.AUTH_PATH && process.env.AUTH_PATH.length > 0
+        ? process.env.AUTH_PATH
+        : (process.env.NODE_ENV === 'production'
+            ? fallback
+            : path.join(os.homedir(), '.whatsapp_ai_auth'));
+
+    // Render free tier cannot write under /home/render — force /tmp
+    if (authPath.startsWith('/home/render')) {
+        console.warn(`AUTH_PATH ${authPath} is not writable on Render free tier. Using ${fallback}`);
+        authPath = fallback;
     }
-    return path.join(os.homedir(), '.whatsapp_ai_auth');
+
+    return authPath;
+}
+
+function ensureAuthDir(authPath) {
+    try {
+        fs.mkdirSync(authPath, { recursive: true });
+        return authPath;
+    } catch (err) {
+        const fallback = '/tmp/whatsapp_ai_auth';
+        if (authPath !== fallback) {
+            console.warn(`Cannot write to ${authPath} (${err.message}), using ${fallback}`);
+            fs.mkdirSync(fallback, { recursive: true });
+            return fallback;
+        }
+        throw err;
+    }
 }
 
 function clearAuthSession() {
-    const authPath = getAuthPath();
+    const authPath = ensureAuthDir(getAuthPath());
     if (fs.existsSync(authPath)) {
         fs.rmSync(authPath, { recursive: true, force: true });
         console.log('Cleared auth_session — a new QR will be generated.');
@@ -138,7 +160,7 @@ async function startWhatsAppBot() {
         await closeActiveSocket();
 
         const { version } = await fetchLatestBaileysVersion();
-        const authPath = getAuthPath();
+        const authPath = ensureAuthDir(getAuthPath());
         const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
         // Persist freshly generated identity keys so QR pairing survives reconnects
