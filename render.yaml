@@ -1,16 +1,16 @@
 services:
   - type: web
     name: whatsapp-ai-assistant
-    env: node
+    runtime: node
     plan: free
     buildCommand: npm install
     startCommand: npm start
     autoDeploy: true
+    healthCheckPath: /status
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 10000
       - key: AUTH_PATH
         value: /home/render/.whatsapp_ai_auth
-    healthCheckPath: /status
+      - key: GROQ_API_KEY
+        sync: false
