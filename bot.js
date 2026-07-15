@@ -24,10 +24,10 @@ let reconnectTimer = null;
 function getAuthPath() {
     if (process.env.AUTH_PATH && process.env.AUTH_PATH.length > 0) return process.env.AUTH_PATH;
     const os = require('os');
-    // For Render/production, use persistent disk storage or home directory
+    // For Render/production, use persistent disk storage
     // For local development, use user's home directory to avoid OneDrive symlink issues
     if (process.env.NODE_ENV === 'production') {
-        return path.join(os.homedir(), '.whatsapp_ai_auth');
+        return '/home/render/.whatsapp_ai_auth';
     }
     return path.join(os.homedir(), '.whatsapp_ai_auth');
 }
@@ -38,27 +38,23 @@ function clearAuthSession() {
         fs.rmSync(authPath, { recursive: true, force: true });
         console.log('Cleared auth_session — a new QR will be generated.');
     }
-    // Ensure directory exists
-    if (!fs.existsSync(authPath)) {
-        fs.mkdirSync(authPath, { recursive: true });
-        console.log('Created auth directory:', authPath);
-    }
-}
-
-function isSessionValid() {
-    const credsFile = path.join(getAuthPath(), 'creds.json');
-    if (!fs.existsSync(credsFile)) return false;
-    try {
-        const creds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
-        return creds.registered === true;
-    } catch {
-        return false;
-    }
 }
 
 function scheduleReconnect(fn, delayMs) {
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(fn, delayMs);
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        fn();
+    }, delayMs);
+}
+
+function shouldClearSession(statusCode) {
+    return (
+        statusCode === DisconnectReason.loggedOut ||
+        statusCode === DisconnectReason.badSession ||
+        statusCode === DisconnectReason.forbidden ||
+        statusCode === DisconnectReason.multideviceMismatch
+    );
 }
 
 async function closeActiveSocket() {
@@ -139,29 +135,17 @@ async function startWhatsAppBot() {
     isStarting = true;
 
     try {
-        const authPath = getAuthPath();
-        console.log('📁 Auth path:', authPath);
-        
-        // Ensure auth directory exists
-        if (!fs.existsSync(authPath)) {
-            fs.mkdirSync(authPath, { recursive: true });
-            console.log('📁 Created auth directory:', authPath);
-        }
-        
-        console.log('📁 Auth path exists:', fs.existsSync(authPath));
-        
-        if (!isSessionValid()) {
-            console.log('Invalid or incomplete session detected — clearing for fresh QR...');
-            clearAuthSession();
-        }
-
         await closeActiveSocket();
 
         const { version } = await fetchLatestBaileysVersion();
-        console.log('📦 Baileys version:', version);
-        
+        const authPath = getAuthPath();
         const { state, saveCreds } = await useMultiFileAuthState(authPath);
-        console.log('🔐 Auth state initialized');
+
+        // Persist freshly generated identity keys so QR pairing survives reconnects
+        if (!state.creds.registered) {
+            await saveCreds();
+            console.log('Auth session ready at', authPath);
+        }
         
         const sock = makeWASocket({
             version,
@@ -173,21 +157,16 @@ async function startWhatsAppBot() {
         });
 
         activeSock = sock;
-        sock.ev.on('creds.update', async (creds) => {
+        sock.ev.on('creds.update', async () => {
             try {
-                console.log('Credentials update received, saving to:', authPath);
-                await saveCreds(creds);
-                console.log('✅ Successfully saved credentials to', authPath);
+                await saveCreds();
             } catch (err) {
-                console.error('❌ Failed saving creds:', err && err.message ? err.message : err);
-                console.error('Full error:', err);
+                console.error('Failed saving creds:', err && err.message ? err.message : err);
             }
         });
         
         sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
-            
-            console.log('Connection update:', { connection, hasQR: !!qr, hasError: !!lastDisconnect?.error });
             
             if (qr) {
                 currentQR = qr;
@@ -198,8 +177,11 @@ async function startWhatsAppBot() {
                 console.log('\n════════════════════════════');
                 console.log('📱 SCAN QR CODE WITH WHATSAPP');
                 console.log('════════════════════════════');
+                const qrUrl = process.env.RENDER_EXTERNAL_URL
+                    ? `${process.env.RENDER_EXTERNAL_URL}/qr`
+                    : `http://localhost:${process.env.PORT || 3000}/qr`;
                 console.log('Open WhatsApp → Linked Devices → Link a Device');
-                console.log('Or visit http://localhost:3000/qr in browser');
+                console.log('Or visit', qrUrl, 'in browser');
                 console.log('════════════════════════════\n');
             }
             
@@ -216,19 +198,22 @@ async function startWhatsAppBot() {
                 isConnected = false;
                 currentQR = null;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const loggedOut = statusCode === DisconnectReason.loggedOut;
-                const qrTimedOut = statusCode === DisconnectReason.timedOut;
+                const clearSession = shouldClearSession(statusCode);
+                const restartRequired = statusCode === DisconnectReason.restartRequired;
                 
-                console.log('Connection closed. Status:', statusCode, loggedOut ? '(logged out)' : qrTimedOut ? '(QR expired)' : '');
-                console.log('Error details:', lastDisconnect?.error);
+                console.log(
+                    'Connection closed. Status:',
+                    statusCode,
+                    clearSession ? '(session cleared)' : restartRequired ? '(restart required after login)' : ''
+                );
                 
                 closeActiveSocket().then(() => {
-                    if (loggedOut || qrTimedOut) {
+                    if (clearSession) {
                         clearAuthSession();
-                        scheduleReconnect(() => startWhatsAppBot(), 2000);
-                    } else {
-                        scheduleReconnect(() => startWhatsAppBot(), 5000);
                     }
+                    // After QR login WhatsApp sends 515 — reconnect quickly without wiping creds
+                    const delay = restartRequired ? 1500 : clearSession ? 2000 : 5000;
+                    scheduleReconnect(() => startWhatsAppBot(), delay);
                 });
             }
         });
