@@ -11,6 +11,6 @@ services:
       - key: NODE_ENV
         value: production
       - key: AUTH_PATH
-        value: /home/render/.whatsapp_ai_auth
+        value: /tmp/whatsapp_ai_auth
       - key: GROQ_API_KEY
         sync: false
