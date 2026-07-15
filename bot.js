@@ -24,8 +24,12 @@ let reconnectTimer = null;
 function getAuthPath() {
     if (process.env.AUTH_PATH && process.env.AUTH_PATH.length > 0) return process.env.AUTH_PATH;
     const os = require('os');
-    // Use a folder in the user's home directory for development to avoid OneDrive symlink issues
-    return process.env.NODE_ENV === 'production' ? '/tmp/auth_session' : path.join(os.homedir(), '.whatsapp_ai_auth');
+    // For Render/production, use persistent disk storage or home directory
+    // For local development, use user's home directory to avoid OneDrive symlink issues
+    if (process.env.NODE_ENV === 'production') {
+        return path.join(os.homedir(), '.whatsapp_ai_auth');
+    }
+    return path.join(os.homedir(), '.whatsapp_ai_auth');
 }
 
 function clearAuthSession() {
@@ -33,6 +37,11 @@ function clearAuthSession() {
     if (fs.existsSync(authPath)) {
         fs.rmSync(authPath, { recursive: true, force: true });
         console.log('Cleared auth_session — a new QR will be generated.');
+    }
+    // Ensure directory exists
+    if (!fs.existsSync(authPath)) {
+        fs.mkdirSync(authPath, { recursive: true });
+        console.log('Created auth directory:', authPath);
     }
 }
 
@@ -130,6 +139,17 @@ async function startWhatsAppBot() {
     isStarting = true;
 
     try {
+        const authPath = getAuthPath();
+        console.log('📁 Auth path:', authPath);
+        
+        // Ensure auth directory exists
+        if (!fs.existsSync(authPath)) {
+            fs.mkdirSync(authPath, { recursive: true });
+            console.log('📁 Created auth directory:', authPath);
+        }
+        
+        console.log('📁 Auth path exists:', fs.existsSync(authPath));
+        
         if (!isSessionValid()) {
             console.log('Invalid or incomplete session detected — clearing for fresh QR...');
             clearAuthSession();
@@ -138,8 +158,10 @@ async function startWhatsAppBot() {
         await closeActiveSocket();
 
         const { version } = await fetchLatestBaileysVersion();
-        const authPath = getAuthPath();
+        console.log('📦 Baileys version:', version);
+        
         const { state, saveCreds } = await useMultiFileAuthState(authPath);
+        console.log('🔐 Auth state initialized');
         
         const sock = makeWASocket({
             version,
@@ -153,15 +175,19 @@ async function startWhatsAppBot() {
         activeSock = sock;
         sock.ev.on('creds.update', async (creds) => {
             try {
+                console.log('Credentials update received, saving to:', authPath);
                 await saveCreds(creds);
-                console.log('Saved credentials to', authPath);
+                console.log('✅ Successfully saved credentials to', authPath);
             } catch (err) {
-                console.error('Failed saving creds:', err && err.message ? err.message : err);
+                console.error('❌ Failed saving creds:', err && err.message ? err.message : err);
+                console.error('Full error:', err);
             }
         });
         
         sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
+            
+            console.log('Connection update:', { connection, hasQR: !!qr, hasError: !!lastDisconnect?.error });
             
             if (qr) {
                 currentQR = qr;
@@ -194,6 +220,7 @@ async function startWhatsAppBot() {
                 const qrTimedOut = statusCode === DisconnectReason.timedOut;
                 
                 console.log('Connection closed. Status:', statusCode, loggedOut ? '(logged out)' : qrTimedOut ? '(QR expired)' : '');
+                console.log('Error details:', lastDisconnect?.error);
                 
                 closeActiveSocket().then(() => {
                     if (loggedOut || qrTimedOut) {
