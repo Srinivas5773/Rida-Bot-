@@ -11,4 +11,6 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: AUTH_PATH
+        value: /home/render/.whatsapp_ai_auth
     healthCheckPath: /status
